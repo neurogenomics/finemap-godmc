@@ -116,7 +116,7 @@ dependencies:
   - r-withr=3.0.2=r45hc72bb7e_1
   - readline=8.3=h853b02a_0
   - sed=4.9=h6688a6e_0
-  - setuptools=80.9.0=pyhff2d567_0 
+  - setuptools=80.9.0=pyhff2d567_0
   - tk=8.6.13=noxft_ha0e22de_103
   - tktable=2.10=h8d826fa_7
   - wheel=0.45.1=pyhd8ed1ab_1

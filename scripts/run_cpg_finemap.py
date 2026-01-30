@@ -8,14 +8,12 @@ import pandas as pd
 import numpy as np
 import argparse
 import time
-
+import socket
 
 def match_variants(ht_snp: hl.Table, ht_idx: hl.Table) -> hl.Table:
     """
     Matches the variants in the GoDMC dataset with the reference panel.
     If there is no match initially, repeats for unmatched SNPs with flipped alleles to ensure maximum coverage.
-
-    Note: count() calls removed for performance - counts are obtained from materialized DataFrames later.
     """
     # Match forward strand variants
     matched_forward = ht_snp.join(ht_idx, how="inner")
@@ -83,7 +81,7 @@ def process_cpg(
     # Filter variant indices with CpG SNP data
     ht_matched = match_variants(ht_snp, ht_idx)
 
-    # Order by idx and materialize to pandas in one step
+    # Order by idx and convert to pandas
     ht_matched = ht_matched.order_by(ht_matched.idx)
     final_snp_df = ht_matched.to_pandas()
 
@@ -112,7 +110,7 @@ def process_cpg(
     ld_np = (ld_np + ld_np.T) / 2
     np.savetxt(f"{out_dir}/{cpg_id}_LD.txt", ld_np, delimiter=",")
 
-    # Clean up intermediate tables to release resources
+    # Clean up intermediate tables
     ht_snp.unpersist()
     ht_matched.unpersist()
 
@@ -216,13 +214,16 @@ def main():
 
     print("Initializing Hail...")
     hl.init(
+        master="local[*]",
         spark_conf={
-            "spark.jars": "/home/tobyc/data/jars/hadoop-aws-3.3.4.jar,/home/tobyc/data/jars/aws-java-sdk-bundle-1.12.539.jar",
+            "spark.jars": "/rds/general/user/tc1125/home/jars/hadoop-aws-3.3.4.jar,/rds/general/user/tc1125/home/jars/aws-java-sdk-bundle-1.12.539.jar",
             "spark.hadoop.fs.s3a.connection.maximum": "200",
             "spark.hadoop.fs.s3a.connection.timeout": "600000",
             "spark.hadoop.fs.s3a.connection.establish.timeout": "600000",
             "spark.hadoop.fs.s3a.attempts.maximum": "10",
             "spark.network.timeout": "600s",
+            "spark.driver.bindAddress": "0.0.0.0",
+            "spark.driver.host": socket.gethostname(),
         }
     )
 
