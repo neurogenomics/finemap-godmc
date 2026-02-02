@@ -8,7 +8,6 @@ import pandas as pd
 import numpy as np
 import argparse
 import time
-import socket
 
 def match_variants(ht_snp: hl.Table, ht_idx: hl.Table) -> hl.Table:
     """
@@ -210,11 +209,20 @@ def main():
         cpg_ids = [cpg.strip() for cpg in args.cpg_list.split(",")]
         print(f"Processing {len(cpg_ids)} CpG IDs")
 
-    os.environ["HAIL_LOG_DIR"] = args.log_dir
+    # Set up unique temp/log directories per job to avoid conflicts
+    job_id = os.environ.get("PBS_ARRAY_INDEX", os.getpid())
+    job_log_dir = os.path.join(args.log_dir, f"job_{job_id}")
+    os.makedirs(job_log_dir, exist_ok=True)
+    os.environ["HAIL_LOG_DIR"] = job_log_dir
+    
+    # Use a unique temp directory for this job
+    tmp_dir = f"/tmp/hail_tmp_{job_id}"
+    os.makedirs(tmp_dir, exist_ok=True)
 
     print("Initializing Hail...")
     hl.init(
         master="local[*]",
+        tmp_dir=tmp_dir,
         spark_conf={
             "spark.jars": "/rds/general/user/tc1125/home/jars/hadoop-aws-3.3.4.jar,/rds/general/user/tc1125/home/jars/aws-java-sdk-bundle-1.12.539.jar",
             "spark.hadoop.fs.s3a.connection.maximum": "200",
@@ -222,8 +230,9 @@ def main():
             "spark.hadoop.fs.s3a.connection.establish.timeout": "600000",
             "spark.hadoop.fs.s3a.attempts.maximum": "10",
             "spark.network.timeout": "600s",
-            "spark.driver.bindAddress": "0.0.0.0",
-            "spark.driver.host": socket.gethostname(),
+            "spark.driver.bindAddress": "127.0.0.1",
+            "spark.driver.host": "localhost",
+            "spark.local.dir": tmp_dir,
         }
     )
 
