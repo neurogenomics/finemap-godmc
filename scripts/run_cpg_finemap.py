@@ -220,41 +220,69 @@ def main():
     tmp_dir = f"/tmp/hail_tmp_{job_id}"
     os.makedirs(tmp_dir, exist_ok=True)
 
-    print("Initializing Hail...")
-    hl.init(
-        master="local[*]",
-        tmp_dir=tmp_dir,
-        spark_conf={
-            "spark.jars": "/rds/general/user/tc1125/home/jars/hadoop-aws-3.3.4.jar,/rds/general/user/tc1125/home/jars/aws-java-sdk-bundle-1.12.539.jar",
-            "spark.hadoop.fs.s3a.connection.maximum": "200",
-            "spark.hadoop.fs.s3a.connection.timeout": "600000",
-            "spark.hadoop.fs.s3a.connection.establish.timeout": "600000",
-            "spark.hadoop.fs.s3a.attempts.maximum": "10",
-            "spark.network.timeout": "600s",
-            "spark.driver.bindAddress": "127.0.0.1",
-            "spark.driver.host": "localhost",
-            "spark.local.dir": tmp_dir,
-        }
-    )
+    # Spark/S3 configuration
+    spark_conf = {
+        "spark.jars": "/rds/general/user/tc1125/home/jars/hadoop-aws-3.3.4.jar,/rds/general/user/tc1125/home/jars/aws-java-sdk-bundle-1.12.539.jar",
+        # S3 connection settings
+        "spark.hadoop.fs.s3a.connection.maximum": "100",
+        "spark.hadoop.fs.s3a.connection.timeout": "600000",
+        "spark.hadoop.fs.s3a.connection.establish.timeout": "600000",
+        "spark.hadoop.fs.s3a.attempts.maximum": "20",
+        "spark.hadoop.fs.s3a.retry.limit": "20",
+        "spark.hadoop.fs.s3a.retry.interval": "500ms",
+        # S3 read settings for resilience
+        "spark.hadoop.fs.s3a.readahead.range": "256K",
+        "spark.hadoop.fs.s3a.input.fadvise": "random",
+        "spark.hadoop.fs.s3a.experimental.input.fadvise": "random",
+        # Connection pool and socket settings
+        "spark.hadoop.fs.s3a.threads.max": "64",
+        # General Spark settings
+        "spark.network.timeout": "600s",
+        "spark.driver.bindAddress": "127.0.0.1",
+        "spark.driver.host": "localhost",
+        "spark.local.dir": tmp_dir,
+    }
 
-    # Load QTL data
+    # S3 paths for LD reference data
+    ld_matrix_path = "s3a://pan-ukb-us-east-1/ld_release/UKBB.EUR.ldadj.bm"
+    ld_variant_index_path = "s3a://pan-ukb-us-east-1/ld_release/UKBB.EUR.ldadj.variant.ht"
+
+    # Load QTL data (only once, outside Hail)
     print(f"Loading QTL data from {qtl_path}...")
     data = pd.read_csv(qtl_path)
 
-    # Load LD reference data
-    print("Loading LD reference data from S3...")
-    ld_matrix_path = "s3a://pan-ukb-us-east-1/ld_release/UKBB.EUR.ldadj.bm"
-    ld_variant_index_path = (
-        "s3a://pan-ukb-us-east-1/ld_release/UKBB.EUR.ldadj.variant.ht"
-    )
+    def init_hail():
+        """Initialize Hail and load LD reference data."""
+        print("Initializing Hail...")
+        hl.init(
+            master="local[*]",
+            tmp_dir=tmp_dir,
+            spark_conf=spark_conf,
+        )
+        print("Loading LD reference data from S3...")
+        bm = BlockMatrix.read(ld_matrix_path)
+        ht_idx = hl.read_table(ld_variant_index_path)
+        print("LD reference data loaded")
+        return bm, ht_idx
 
-    bm = BlockMatrix.read(ld_matrix_path)
-    ht_idx = hl.read_table(ld_variant_index_path)
-    print("LD reference data loaded")
+    def stop_hail():
+        """Stop Hail and clean up connections."""
+        print("Stopping Hail to release S3 connections...")
+        hl.stop()
 
-    # Process each CpG
-    print(f"\nProcessing {len(cpg_ids)} CpGs...\n")
+    # Initial Hail setup
+    bm, ht_idx = init_hail()
+
+    # Process each CpG, restarting Hail every 40 iterations to prevent S3 connection pool exhaustion
+    RESTART_INTERVAL = 40
+    print(f"\nProcessing {len(cpg_ids)} CpGs (restarting Hail every {RESTART_INTERVAL})...\n")
+    
     for i, cpg_id in enumerate(cpg_ids, 1):
+        # Restart Hail periodically to release S3 connections
+        if i > 1 and (i - 1) % RESTART_INTERVAL == 0:
+            stop_hail()
+            bm, ht_idx = init_hail()
+        
         print(f"[{i}/{len(cpg_ids)}] ", end="")
         try:
             success = process_cpg(cpg_id, data, bm, ht_idx, out_dir)
@@ -265,6 +293,8 @@ def main():
             print(f"  ERROR processing {cpg_id}: {e}")
             continue
 
+    # Final cleanup
+    stop_hail()
     print("\nFinished processing CpGs.")
 
 

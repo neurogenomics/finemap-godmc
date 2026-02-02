@@ -1,8 +1,8 @@
 #!/bin/bash
-#PBS -l select=1:ncpus=65:mem=250gb
+#PBS -l select=1:ncpus=24:mem=80gb
 #PBS -l walltime=24:00:00
 #PBS -N run_finemap
-#PBS -J 1-60
+#PBS -J 1-90
 
 cd $PBS_O_WORKDIR
 
@@ -16,7 +16,7 @@ export AWS_DEFAULT_REGION="us-east-1"
 IDS="../data/godmc/cpg_ids.txt"
 
 TOTAL=$(wc -l < $IDS)
-NUM_JOBS=60
+NUM_JOBS=90
 
 TASK_ID=$((PBS_ARRAY_INDEX - 1))
 CHUNK_SIZE=$(( (TOTAL + NUM_JOBS - 1) / NUM_JOBS ))
