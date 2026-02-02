@@ -4,6 +4,7 @@ import hail as hl
 from hail.linalg import BlockMatrix
 import os
 import subprocess
+import shutil
 import pandas as pd
 import numpy as np
 import argparse
@@ -211,13 +212,15 @@ def main():
         print(f"Processing {len(cpg_ids)} CpG IDs")
 
     # Set up unique temp/log directories per job to avoid conflicts
-    job_id = os.environ.get("PBS_ARRAY_INDEX", os.getpid())
+    job_id = os.environ.get("PBS_ARRAY_INDEX", str(os.getpid()))
     job_log_dir = os.path.join(args.log_dir, f"job_{job_id}")
     os.makedirs(job_log_dir, exist_ok=True)
     os.environ["HAIL_LOG_DIR"] = job_log_dir
     
-    # Use a unique temp directory for this job
-    tmp_dir = f"/tmp/hail_tmp_{job_id}"
+    # Use RDS ephemeral storage for temp (more space than /tmp)
+    # Falls back to output dir parent if EPHEMERAL not set
+    ephemeral_base = os.environ.get("EPHEMERAL", os.path.dirname(os.path.abspath(out_dir)))
+    tmp_dir = os.path.join(ephemeral_base, f"hail_tmp_{job_id}")
     os.makedirs(tmp_dir, exist_ok=True)
 
     # Spark/S3 configuration
@@ -274,6 +277,10 @@ def main():
         """Stop Hail and clean up connections."""
         print("Stopping Hail to release S3 connections...")
         hl.stop()
+        # Clean up temp directory to prevent disk quota issues
+        if os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            os.makedirs(tmp_dir, exist_ok=True)
         time.sleep(2)  # Allow connections to fully close before reinitializing
 
     # Initial Hail setup

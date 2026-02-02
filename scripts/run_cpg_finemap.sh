@@ -13,6 +13,10 @@ export AWS_ACCESS_KEY_ID=$(grep -A2 '\[default\]' ~/.aws/credentials | grep aws_
 export AWS_SECRET_ACCESS_KEY=$(grep -A2 '\[default\]' ~/.aws/credentials | grep aws_secret_access_key | cut -d'=' -f2 | tr -d ' ')
 export AWS_DEFAULT_REGION="us-east-1"
 
+# Use ephemeral storage for Spark temp files (avoids /tmp quota issues)
+# Set to a directory with plenty of space - adjust path as needed for your cluster
+export EPHEMERAL="${TMPDIR:-/tmp}"
+
 IDS="../data/godmc/cpg_ids.txt"
 
 TOTAL=$(wc -l < $IDS)
