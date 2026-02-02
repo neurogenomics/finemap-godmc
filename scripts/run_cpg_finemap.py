@@ -241,6 +241,11 @@ def main():
         "spark.driver.bindAddress": "127.0.0.1",
         "spark.driver.host": "localhost",
         "spark.local.dir": tmp_dir,
+        # Disable Spark UI to avoid port conflicts when multiple jobs run on the same node
+        "spark.ui.enabled": "false",
+        # Use random ports for driver to avoid conflicts
+        "spark.driver.port": "0",
+        "spark.blockManager.port": "0",
     }
 
     # S3 paths for LD reference data
@@ -269,6 +274,7 @@ def main():
         """Stop Hail and clean up connections."""
         print("Stopping Hail to release S3 connections...")
         hl.stop()
+        time.sleep(2)  # Allow connections to fully close before reinitializing
 
     # Initial Hail setup
     bm, ht_idx = init_hail()
