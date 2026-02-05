@@ -42,7 +42,7 @@ echo "Using temp directory: ${TEMP_DIR}"
 sed -n "${START},${END}p" $IDS > "${TEMP_DIR}/cpgs.txt"
 
 # Run optimized script with all paths relative to repo root
-python scripts/run_cpg_finemap_optimized.py \
+python run_cpg_finemap_optimized.py \
     --cpg-list "${TEMP_DIR}/cpgs.txt" \
     --batch-size 25 \
     --resume \
