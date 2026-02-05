@@ -4,7 +4,11 @@
 #PBS -N run_finemap
 #PBS -J 1-20
 
-cd $PBS_O_WORKDIR
+# Change to the directory where this script is located, then go to parent (repo root)
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "${SCRIPT_DIR}/.."
+
+echo "Repository root: $(pwd)"
 
 eval "$(~/miniforge3/bin/conda shell.bash hook)"
 conda activate finemapping
@@ -17,7 +21,8 @@ export AWS_DEFAULT_REGION="us-east-1"
 # Use ephemeral storage for Spark temp files (more space than /tmp)
 export EPHEMERAL="${EPHEMERAL:-${TMPDIR:-/tmp}}"
 
-IDS="../data/godmc/cpg_ids.txt"
+# All paths are relative to repo root
+IDS="data/godmc/cpg_ids.txt"
 
 TOTAL=$(wc -l < $IDS)
 NUM_JOBS=20
@@ -29,27 +34,33 @@ END=$(( START + CHUNK_SIZE - 1 ))
 if [ "$END" -gt "$TOTAL" ]; then END=$TOTAL; fi
 
 echo "Job ${PBS_ARRAY_INDEX}: Processing CpGs ${START}-${END} ($((${END} - ${START} + 1)) CpGs)"
-echo "Using ${EPHEMERAL} for temporary files"
+echo "Working directory: $(pwd)"
 echo "Start time: $(date)"
 
-# Extract this task's CpGs
-sed -n "${START},${END}p" $IDS > cpgs_job_${PBS_ARRAY_INDEX}.txt
+# Create temp directory in ephemeral storage for this job's files
+TEMP_DIR="${EPHEMERAL}/finemap_job_${PBS_ARRAY_INDEX}"
+mkdir -p "${TEMP_DIR}"
+echo "Using temp directory: ${TEMP_DIR}"
 
-# Run optimized script
-python run_cpg_finemap_optimized.py \
-    --cpg-list cpgs_job_${PBS_ARRAY_INDEX}.txt \
-    --batch-size 50 \
+# Extract this task's CpGs
+sed -n "${START},${END}p" $IDS > "${TEMP_DIR}/cpgs.txt"
+
+# Run optimized script with all paths relative to repo root
+python scripts/run_cpg_finemap_optimized.py \
+    --cpg-list "${TEMP_DIR}/cpgs.txt" \
+    --batch-size 25 \
     --resume \
     --cleanup \
-    --log-file ../logs/hail/finemap_job_${PBS_ARRAY_INDEX}.log
+    --log-file logs/hail/finemap_job_${PBS_ARRAY_INDEX}.log \
+    --output-dir data/finemapping_tmp/ \
+    --susie-out-dir data/susie_results/
 
 EXIT_CODE=$?
 
 echo "End time: $(date)"
 echo "Exit code: ${EXIT_CODE}"
 
-# Clean up temporary file
-rm -f cpgs_job_${PBS_ARRAY_INDEX}.txt
+# Clean up temporary directory
+rm -rf "${TEMP_DIR}"
 
 exit ${EXIT_CODE}
-

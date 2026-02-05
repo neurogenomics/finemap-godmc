@@ -398,6 +398,16 @@ def process_batch_optimized(
     ht_matched = ht_matched.order_by(ht_matched.idx)
     matched_df = ht_matched.to_pandas()
     
+    # OPTIMIZATION: Extract entire batch matrix to numpy ONCE
+    # Then use numpy slicing for each CpG (much faster than BlockMatrix.filter)
+    logger.info(f"  Extracting batch matrix to numpy...")
+    extract_start = time.time()
+    batch_matrix = bm_batch.to_numpy()
+    # Symmetrize once for the whole batch matrix
+    batch_matrix = (batch_matrix + batch_matrix.T) / 2
+    logger.info(f"  Batch matrix extracted in {time.time() - extract_start:.2f}s "
+                f"(shape: {batch_matrix.shape}, memory: {batch_matrix.nbytes / 1e6:.1f} MB)")
+    
     # Create index mapping for submatrix extraction
     idx_to_position = {idx: pos for pos, idx in enumerate(all_indices)}
     
@@ -429,10 +439,9 @@ def process_batch_optimized(
             cpg_indices = cpg_snps['idx'].tolist()
             positions = [idx_to_position[idx] for idx in cpg_indices]
             
-            # Extract submatrix (much faster than filtering again)
-            bm_cpg = bm_batch.filter(positions, positions)
-            ld_np = bm_cpg.to_numpy()
-            ld_np = (ld_np + ld_np.T) / 2
+            # OPTIMIZATION: Use numpy slicing instead of BlockMatrix.filter()
+            # This is ~100-1000x faster than bm_batch.filter(positions, positions).to_numpy()
+            ld_np = batch_matrix[np.ix_(positions, positions)]
             
             # Save LD matrix
             ld_file = f"{out_dir}/{cpg_id}_LD.txt"
@@ -456,6 +465,8 @@ def process_batch_optimized(
     # Cleanup
     ht_snp.unpersist()
     ht_matched.unpersist()
+    bm_batch.unpersist()  # Unpersist the BlockMatrix
+    del batch_matrix      # Free numpy matrix memory
     gc.collect()
     
     logger.info(f"  Batch completed in {time.time() - batch_start:.2f}s "
@@ -576,8 +587,8 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=50,
-        help="Number of CpGs per batch (default: 50)"
+        default=25,
+        help="Number of CpGs per batch (default: 25)"
     )
     parser.add_argument(
         "--resume",
