@@ -4,19 +4,7 @@
 #PBS -N run_finemap
 #PBS -J 1-20
 
-SEARCH_DIR="${PBS_O_WORKDIR:-$PWD}"
-
-# Find repository root by looking for data/godmc directory
-while [ "$SEARCH_DIR" != "/" ]; do
-    if [ -d "$SEARCH_DIR/data/godmc" ]; then
-        cd "$SEARCH_DIR"
-        break
-    fi
-    SEARCH_DIR="$(dirname "$SEARCH_DIR")"
-done
-
-echo "Repository root: $(pwd)"
-echo "PBS_O_WORKDIR was: ${PBS_O_WORKDIR:-"Not set"}"
+cd "$PBS_O_WORKDIR"
 
 eval "$(~/miniforge3/bin/conda shell.bash hook)"
 conda activate finemapping
@@ -29,8 +17,8 @@ export AWS_DEFAULT_REGION="us-east-1"
 # Use ephemeral storage for Spark temp files (more space than /tmp)
 export EPHEMERAL="${EPHEMERAL:-${TMPDIR:-/tmp}}"
 
-# All paths are relative to repo root
-IDS="data/godmc/cpg_ids.txt"
+
+IDS="../data/godmc/cpg_ids.txt"
 
 TOTAL=$(wc -l < $IDS)
 NUM_JOBS=20
@@ -60,8 +48,8 @@ python scripts/run_cpg_finemap_optimized.py \
     --resume \
     --cleanup \
     --log-file logs/hail/finemap_job_${PBS_ARRAY_INDEX}.log \
-    --output-dir data/finemapping_tmp/ \
-    --susie-out-dir data/susie_results/
+    --output-dir ../data/finemapping_tmp/ \
+    --susie-out-dir ../data/susie_results/
 
 EXIT_CODE=$?
 
