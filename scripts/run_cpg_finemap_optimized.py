@@ -23,8 +23,92 @@ import time
 import logging
 import gc
 from datetime import datetime
-from typing import List, Dict, Set, Tuple
+from typing import List, Dict, Set, Tuple, Optional, Union
 from collections import defaultdict
+from contextlib import contextmanager
+
+
+# Global variable to track tmp_dir for cleanup
+_GLOBAL_TMP_DIR: Optional[str] = None
+
+
+def safe_unpersist(obj, logger: logging.Logger, name: str = "object") -> None:
+    """
+    Safely unpersist a Hail Table or BlockMatrix with error handling.
+    
+    If unpersist() fails (e.g., "Directory not empty"), log the error
+    but don't raise - the tmp directory cleanup at the end will handle it.
+    """
+    if obj is None:
+        return
+    
+    try:
+        obj.unpersist()
+        logger.debug(f"  Successfully unpersisted {name}")
+    except Exception as e:
+        # Log but don't raise - we'll clean up the tmp dir at the end
+        logger.warning(f"  Failed to unpersist {name}: {e}. Will be cleaned up with tmp dir.")
+
+
+def cleanup_persist_directories(tmp_dir: str, logger: logging.Logger) -> None:
+    """
+    Force cleanup of any leftover persist_* directories in the tmp folder.
+    
+    This handles the case where unpersist() fails due to non-empty directories.
+    Uses shutil.rmtree with ignore_errors for robust cleanup.
+    """
+    if not tmp_dir or not os.path.exists(tmp_dir):
+        return
+    
+    try:
+        cleaned = 0
+        for item in os.listdir(tmp_dir):
+            if item.startswith('persist_'):
+                item_path = os.path.join(tmp_dir, item)
+                if os.path.isdir(item_path):
+                    shutil.rmtree(item_path, ignore_errors=True)
+                    cleaned += 1
+        if cleaned > 0:
+            logger.info(f"  Cleaned up {cleaned} leftover persist_* directories")
+    except Exception as e:
+        logger.warning(f"  Error during persist directory cleanup: {e}")
+
+
+@contextmanager
+def hail_resource_manager(logger: logging.Logger, tmp_dir: Optional[str] = None):
+    """
+    Context manager for tracking and cleaning up Hail resources.
+    
+    Usage:
+        with hail_resource_manager(logger, tmp_dir) as resources:
+            ht = hl.Table.from_pandas(df).cache()
+            resources.track(ht, "my_table")
+            # ... do work ...
+        # Resources automatically cleaned up here
+    """
+    class ResourceTracker:
+        def __init__(self):
+            self.resources = []
+        
+        def track(self, obj, name: str = "resource"):
+            """Track a Hail object for cleanup."""
+            self.resources.append((obj, name))
+            return obj
+        
+        def cleanup(self):
+            """Clean up all tracked resources."""
+            for obj, name in reversed(self.resources):
+                safe_unpersist(obj, logger, name)
+            self.resources.clear()
+    
+    tracker = ResourceTracker()
+    try:
+        yield tracker
+    finally:
+        tracker.cleanup()
+        # Also clean up any leftover persist directories
+        if tmp_dir:
+            cleanup_persist_directories(tmp_dir, logger)
 
 
 def setup_logging(log_file: str) -> logging.Logger:
@@ -156,7 +240,7 @@ def get_batch_snp_indices(
     batch_cpgs: List[str],
     data: pd.DataFrame,
     ht_idx: hl.Table,
-    logger: logging.Logger = None
+    logger: Optional[logging.Logger] = None
 ) -> Tuple[pd.DataFrame, Dict[str, int]]:
     """
     Get all SNP indices needed for all CpGs in a batch.
@@ -239,9 +323,10 @@ def process_single_cpg(
     out_dir: str,
     susie_out_dir: str,
     cleanup: bool,
-    logger: logging.Logger
+    logger: logging.Logger,
+    tmp_dir: Optional[str] = None
 ) -> bool:
-    """Process a single CpG site."""
+    """Process a single CpG site with robust resource cleanup."""
     start = time.time()
     logger.info(f"Processing CpG {cpg_id}...")
     
@@ -269,59 +354,69 @@ def process_single_cpg(
         logger.warning(f"No SNPs in window for CpG {cpg_id}, skipping.")
         return False
     
-    # Convert to Hail format
-    ht_snp = hl.Table.from_pandas(snp_df)
-    ht_snp = ht_snp.annotate(
-        locus=hl.locus(ht_snp.chr, ht_snp.pos),
-        alleles=hl.array([ht_snp.allele2, ht_snp.allele1]),
-    )
-    ht_snp = ht_snp.key_by(locus=ht_snp.locus, alleles=ht_snp.alleles)
-    ht_snp = ht_snp.cache()
+    # Track resources for cleanup
+    ht_snp = None
+    ht_matched = None
+    bm_filtered = None
     
-    # Match variants
-    ht_matched = match_variants(ht_snp, ht_idx)
-    ht_matched = ht_matched.cache()
-    
-    # Order and convert to pandas
-    ht_matched = ht_matched.order_by(ht_matched.idx)
-    final_snp_df = ht_matched.to_pandas()
-    
-    if len(final_snp_df) == 0:
-        logger.warning(f"No matched variants for CpG {cpg_id}, skipping.")
-        ht_snp.unpersist()
-        ht_matched.unpersist()
-        return False
-    
-    # Log match counts
-    n_forward = (~final_snp_df['flipped']).sum()
-    n_flipped = (final_snp_df['flipped']).sum()
-    logger.info(f"  Matched {len(final_snp_df)} variants ({n_forward} forward, {n_flipped} flipped)")
-    
-    # Flip signs and save
-    final_snp_df['Z'] = np.where(final_snp_df['flipped'], -final_snp_df['Z'], final_snp_df['Z'])
-    final_snp_df['AF'] = np.where(final_snp_df['flipped'], 1 - final_snp_df['AF'], final_snp_df['AF'])
-    
-    csv_file = f"{out_dir}/{cpg_id}.csv"
-    final_snp_df.to_csv(csv_file, index=False)
-    
-    # Get indices and filter BlockMatrix
-    idx = final_snp_df['idx'].tolist()
-    bm_filtered = bm.filter(idx, idx)
-    
-    # Extract and symmetrize LD matrix
-    ld_np = bm_filtered.to_numpy()
-    ld_np = (ld_np + ld_np.T) / 2
-    
-    ld_file = f"{out_dir}/{cpg_id}_LD.txt"
-    np.savetxt(ld_file, ld_np, delimiter=",")
-    
-    # Cleanup intermediate tables
-    ht_snp.unpersist()
-    ht_matched.unpersist()
-    
-    logger.info(f"  Data prep completed in {time.time() - start:.2f}s")
-    
-    return True
+    try:
+        # Convert to Hail format
+        ht_snp = hl.Table.from_pandas(snp_df)
+        ht_snp = ht_snp.annotate(
+            locus=hl.locus(ht_snp.chr, ht_snp.pos),
+            alleles=hl.array([ht_snp.allele2, ht_snp.allele1]),
+        )
+        ht_snp = ht_snp.key_by(locus=ht_snp.locus, alleles=ht_snp.alleles)
+        ht_snp = ht_snp.cache()
+        
+        # Match variants
+        ht_matched = match_variants(ht_snp, ht_idx)
+        ht_matched = ht_matched.cache()
+        
+        # Order and convert to pandas
+        ht_matched = ht_matched.order_by(ht_matched.idx)
+        final_snp_df = ht_matched.to_pandas()
+        
+        if len(final_snp_df) == 0:
+            logger.warning(f"No matched variants for CpG {cpg_id}, skipping.")
+            return False
+        
+        # Log match counts
+        n_forward = (~final_snp_df['flipped']).sum()
+        n_flipped = (final_snp_df['flipped']).sum()
+        logger.info(f"  Matched {len(final_snp_df)} variants ({n_forward} forward, {n_flipped} flipped)")
+        
+        # Flip signs and save
+        final_snp_df['Z'] = np.where(final_snp_df['flipped'], -final_snp_df['Z'], final_snp_df['Z'])
+        final_snp_df['AF'] = np.where(final_snp_df['flipped'], 1 - final_snp_df['AF'], final_snp_df['AF'])
+        
+        csv_file = f"{out_dir}/{cpg_id}.csv"
+        final_snp_df.to_csv(csv_file, index=False)
+        
+        # Get indices and filter BlockMatrix
+        idx = final_snp_df['idx'].tolist()
+        bm_filtered = bm.filter(idx, idx)
+        
+        # Extract and symmetrize LD matrix
+        ld_np = bm_filtered.to_numpy()
+        ld_np = (ld_np + ld_np.T) / 2
+        
+        ld_file = f"{out_dir}/{cpg_id}_LD.txt"
+        np.savetxt(ld_file, ld_np, delimiter=",")
+        
+        logger.info(f"  Data prep completed in {time.time() - start:.2f}s")
+        
+        return True
+        
+    finally:
+        # Always cleanup resources, even on exception
+        safe_unpersist(ht_snp, logger, f"ht_snp_{cpg_id}")
+        safe_unpersist(ht_matched, logger, f"ht_matched_{cpg_id}")
+        safe_unpersist(bm_filtered, logger, f"bm_filtered_{cpg_id}")
+        
+        # Clean up any leftover persist directories
+        if tmp_dir:
+            cleanup_persist_directories(tmp_dir, logger)
 
 
 def process_batch_optimized(
@@ -333,10 +428,14 @@ def process_batch_optimized(
     susie_out_dir: str,
     cleanup: bool,
     completed_cpgs: Set[str],
-    logger: logging.Logger
+    logger: logging.Logger,
+    tmp_dir: Optional[str] = None
 ) -> Tuple[List[str], List[str]]:
     """
     Process a batch of CpGs with optimized BlockMatrix filtering.
+    
+    Uses try/finally to ensure all cached resources are cleaned up,
+    even if exceptions occur during processing.
     
     Returns:
         - List of successfully processed CpGs
@@ -364,115 +463,129 @@ def process_batch_optimized(
     
     logger.info(f"  Total SNPs in batch: {len(batch_df)}")
     
-    # Convert to Hail and match all at once
-    ht_snp = hl.Table.from_pandas(batch_df)
-    ht_snp = ht_snp.annotate(
-        locus=hl.locus(ht_snp.chr, ht_snp.pos),
-        alleles=hl.array([ht_snp.allele2, ht_snp.allele1]),
-    )
-    ht_snp = ht_snp.key_by(locus=ht_snp.locus, alleles=ht_snp.alleles)
-    ht_snp = ht_snp.cache()
+    # Track resources for cleanup
+    ht_snp = None
+    ht_matched = None
+    bm_batch = None
+    batch_matrix = None
+    successful = []
+    failed = []
     
-    ht_matched = match_variants(ht_snp, ht_idx)
-    ht_matched = ht_matched.cache()
-    
-    # Get all unique indices for batch
-    all_indices = ht_matched.aggregate(hl.agg.collect_as_set(ht_matched.idx))
-    all_indices = sorted(list(all_indices))
-    
-    logger.info(f"  Unique SNP indices in batch: {len(all_indices)}")
-    
-    # Single BlockMatrix filter for entire batch
-    if len(all_indices) > 0:
+    try:
+        # Convert to Hail and match all at once
+        ht_snp = hl.Table.from_pandas(batch_df)
+        ht_snp = ht_snp.annotate(
+            locus=hl.locus(ht_snp.chr, ht_snp.pos),
+            alleles=hl.array([ht_snp.allele2, ht_snp.allele1]),
+        )
+        ht_snp = ht_snp.key_by(locus=ht_snp.locus, alleles=ht_snp.alleles)
+        ht_snp = ht_snp.cache()
+        
+        ht_matched = match_variants(ht_snp, ht_idx)
+        ht_matched = ht_matched.cache()
+        
+        # Get all unique indices for batch
+        all_indices = ht_matched.aggregate(hl.agg.collect_as_set(ht_matched.idx))
+        all_indices = sorted(list(all_indices))
+        
+        logger.info(f"  Unique SNP indices in batch: {len(all_indices)}")
+        
+        # Single BlockMatrix filter for entire batch
+        if len(all_indices) == 0:
+            logger.warning(f"  No valid SNP indices found for batch")
+            return [], cpgs_to_process
+        
         logger.info(f"  Filtering BlockMatrix...")
         filter_start = time.time()
         bm_batch = bm.filter(all_indices, all_indices)
         logger.info(f"  BlockMatrix filter completed in {time.time() - filter_start:.2f}s")
-    else:
-        logger.warning(f"  No valid SNP indices found for batch")
-        ht_snp.unpersist()
-        ht_matched.unpersist()
-        return [], cpgs_to_process
-    
-    # Convert matched table to pandas and split by CpG
-    ht_matched = ht_matched.order_by(ht_matched.idx)
-    matched_df = ht_matched.to_pandas()
-    
-    # OPTIMIZATION: Extract entire batch matrix to numpy ONCE
-    # Then use numpy slicing for each CpG (much faster than BlockMatrix.filter)
-    logger.info(f"  Extracting batch matrix to numpy...")
-    extract_start = time.time()
-    batch_matrix = bm_batch.to_numpy()
-    # Symmetrize once for the whole batch matrix
-    batch_matrix = (batch_matrix + batch_matrix.T) / 2
-    logger.info(f"  Batch matrix extracted in {time.time() - extract_start:.2f}s "
-                f"(shape: {batch_matrix.shape}, memory: {batch_matrix.nbytes / 1e6:.1f} MB)")
-    
-    # Create index mapping for submatrix extraction
-    idx_to_position = {idx: pos for pos, idx in enumerate(all_indices)}
-    
-    # Process each CpG
-    successful = []
-    failed = []
-    
-    for cpg_id in cpgs_to_process:
-        cpg_start = time.time()
         
-        try:
-            # Get SNPs for this CpG
-            cpg_snps = matched_df[matched_df['cpg_id'] == cpg_id].copy()
+        # Convert matched table to pandas and split by CpG
+        ht_matched = ht_matched.order_by(ht_matched.idx)
+        matched_df = ht_matched.to_pandas()
+        
+        # OPTIMIZATION: Extract entire batch matrix to numpy ONCE
+        # Then use numpy slicing for each CpG (much faster than BlockMatrix.filter)
+        logger.info(f"  Extracting batch matrix to numpy...")
+        extract_start = time.time()
+        batch_matrix = bm_batch.to_numpy()
+        # Symmetrize once for the whole batch matrix
+        batch_matrix = (batch_matrix + batch_matrix.T) / 2
+        logger.info(f"  Batch matrix extracted in {time.time() - extract_start:.2f}s "
+                    f"(shape: {batch_matrix.shape}, memory: {batch_matrix.nbytes / 1e6:.1f} MB)")
+        
+        # Create index mapping for submatrix extraction
+        idx_to_position = {idx: pos for pos, idx in enumerate(all_indices)}
+        
+        # Process each CpG
+        for cpg_id in cpgs_to_process:
+            cpg_start = time.time()
             
-            if len(cpg_snps) == 0:
-                logger.warning(f"    No matched SNPs for {cpg_id}, skipping")
+            try:
+                # Get SNPs for this CpG
+                cpg_snps = matched_df[matched_df['cpg_id'] == cpg_id].copy()
+                
+                if len(cpg_snps) == 0:
+                    logger.warning(f"    No matched SNPs for {cpg_id}, skipping")
+                    failed.append(cpg_id)
+                    continue
+                
+                # Flip signs
+                cpg_snps['Z'] = np.where(cpg_snps['flipped'], -cpg_snps['Z'], cpg_snps['Z'])
+                cpg_snps['AF'] = np.where(cpg_snps['flipped'], 1 - cpg_snps['AF'], cpg_snps['AF'])
+                
+                # Save CSV
+                csv_file = f"{out_dir}/{cpg_id}.csv"
+                cpg_snps.to_csv(csv_file, index=False)
+                
+                # Get indices for this CpG
+                cpg_indices = cpg_snps['idx'].tolist()
+                positions = [idx_to_position[idx] for idx in cpg_indices]
+                
+                # OPTIMIZATION: Use numpy slicing instead of BlockMatrix.filter()
+                # This is ~100-1000x faster than bm_batch.filter(positions, positions).to_numpy()
+                ld_np = batch_matrix[np.ix_(positions, positions)]
+                
+                # Save LD matrix
+                ld_file = f"{out_dir}/{cpg_id}_LD.txt"
+                np.savetxt(ld_file, ld_np, delimiter=",")
+                
+                # Run SuSiE
+                if run_susie(cpg_id, out_dir, susie_out_dir, cleanup, logger):
+                    successful.append(cpg_id)
+                    save_checkpoint(cpg_id, 'SUCCESS', 'completed.log')
+                else:
+                    failed.append(cpg_id)
+                    save_checkpoint(cpg_id, 'FAILED: SuSiE', 'failed.log')
+                
+                logger.info(f"    {cpg_id} completed in {time.time() - cpg_start:.2f}s")
+                
+            except Exception as e:
+                logger.error(f"    Error processing {cpg_id}: {e}")
                 failed.append(cpg_id)
-                continue
-            
-            # Flip signs
-            cpg_snps['Z'] = np.where(cpg_snps['flipped'], -cpg_snps['Z'], cpg_snps['Z'])
-            cpg_snps['AF'] = np.where(cpg_snps['flipped'], 1 - cpg_snps['AF'], cpg_snps['AF'])
-            
-            # Save CSV
-            csv_file = f"{out_dir}/{cpg_id}.csv"
-            cpg_snps.to_csv(csv_file, index=False)
-            
-            # Get indices for this CpG
-            cpg_indices = cpg_snps['idx'].tolist()
-            positions = [idx_to_position[idx] for idx in cpg_indices]
-            
-            # OPTIMIZATION: Use numpy slicing instead of BlockMatrix.filter()
-            # This is ~100-1000x faster than bm_batch.filter(positions, positions).to_numpy()
-            ld_np = batch_matrix[np.ix_(positions, positions)]
-            
-            # Save LD matrix
-            ld_file = f"{out_dir}/{cpg_id}_LD.txt"
-            np.savetxt(ld_file, ld_np, delimiter=",")
-            
-            # Run SuSiE
-            if run_susie(cpg_id, out_dir, susie_out_dir, cleanup, logger):
-                successful.append(cpg_id)
-                save_checkpoint(cpg_id, 'SUCCESS', 'completed.log')
-            else:
-                failed.append(cpg_id)
-                save_checkpoint(cpg_id, 'FAILED: SuSiE', 'failed.log')
-            
-            logger.info(f"    {cpg_id} completed in {time.time() - cpg_start:.2f}s")
-            
-        except Exception as e:
-            logger.error(f"    Error processing {cpg_id}: {e}")
-            failed.append(cpg_id)
-            save_checkpoint(cpg_id, f'FAILED: {e}', 'failed.log')
-    
-    # Cleanup
-    ht_snp.unpersist()
-    ht_matched.unpersist()
-    bm_batch.unpersist()  # Unpersist the BlockMatrix
-    del batch_matrix      # Free numpy matrix memory
-    gc.collect()
-    
-    logger.info(f"  Batch completed in {time.time() - batch_start:.2f}s "
-                f"({len(successful)} success, {len(failed)} failed)")
-    
-    return successful, failed
+                save_checkpoint(cpg_id, f'FAILED: {e}', 'failed.log')
+        
+        logger.info(f"  Batch completed in {time.time() - batch_start:.2f}s "
+                    f"({len(successful)} success, {len(failed)} failed)")
+        
+        return successful, failed
+        
+    finally:
+        # Always cleanup resources, even on exception
+        # Use safe_unpersist to handle "Directory not empty" errors gracefully
+        safe_unpersist(ht_snp, logger, "batch_ht_snp")
+        safe_unpersist(ht_matched, logger, "batch_ht_matched")
+        safe_unpersist(bm_batch, logger, "batch_bm")
+        
+        # Free numpy matrix memory
+        if batch_matrix is not None:
+            del batch_matrix
+        
+        gc.collect()
+        
+        # Clean up any leftover persist directories
+        if tmp_dir:
+            cleanup_persist_directories(tmp_dir, logger)
 
 
 def process_single_cpg_fallback(
@@ -483,13 +596,14 @@ def process_single_cpg_fallback(
     out_dir: str,
     susie_out_dir: str,
     cleanup: bool,
-    logger: logging.Logger
+    logger: logging.Logger,
+    tmp_dir: Optional[str] = None
 ) -> bool:
     """Process a single CpG individually (fallback for batch failures)."""
     logger.info(f"  Processing {cpg_id} individually (fallback)...")
     
     try:
-        if process_single_cpg(cpg_id, data, bm, ht_idx, out_dir, susie_out_dir, cleanup, logger):
+        if process_single_cpg(cpg_id, data, bm, ht_idx, out_dir, susie_out_dir, cleanup, logger, tmp_dir):
             if run_susie(cpg_id, out_dir, susie_out_dir, cleanup, logger):
                 save_checkpoint(cpg_id, 'SUCCESS', 'completed.log')
                 return True
@@ -773,7 +887,7 @@ def main():
         try:
             successful, failed = process_batch_optimized(
                 batch, data, bm, ht_idx, args.output_dir, args.susie_out_dir,
-                args.cleanup, completed_cpgs, logger
+                args.cleanup, completed_cpgs, logger, tmp_dir
             )
             
             total_successful += len(successful)
@@ -785,7 +899,7 @@ def main():
                 for cpg_id in failed:
                     if process_single_cpg_fallback(
                         cpg_id, data, bm, ht_idx, args.output_dir,
-                        args.susie_out_dir, args.cleanup, logger
+                        args.susie_out_dir, args.cleanup, logger, tmp_dir
                     ):
                         total_successful += 1
                         if cpg_id in total_failed:
@@ -803,16 +917,18 @@ def main():
                     
                 if process_single_cpg_fallback(
                     cpg_id, data, bm, ht_idx, args.output_dir,
-                    args.susie_out_dir, args.cleanup, logger
+                    args.susie_out_dir, args.cleanup, logger, tmp_dir
                 ):
                     total_successful += 1
                 else:
                     total_failed.append(cpg_id)
                     batch_failures.append(cpg_id)
         
-        # Periodic memory cleanup and progress report
-        if i % 10 == 0:
+        # Periodic memory cleanup, progress report, and tmp dir cleanup
+        if i % 5 == 0:
             gc.collect()
+            # Clean up any leftover persist directories periodically
+            cleanup_persist_directories(tmp_dir, logger)
             logger.info(f"\nProgress: {i}/{len(batches)} batches "
                        f"({total_successful} successful, {len(total_failed)} failed)\n")
     
