@@ -4,17 +4,19 @@
 #PBS -N run_finemap
 #PBS -J 1-20
 
-# Find repository root by looking for data/godmc directory (works from any subdirectory)
-CURRENT_DIR="$PWD"
-while [ "$CURRENT_DIR" != "/" ]; do
-    if [ -d "$CURRENT_DIR/data/godmc" ]; then
-        cd "$CURRENT_DIR"
+SEARCH_DIR="${PBS_O_WORKDIR:-$PWD}"
+
+# Find repository root by looking for data/godmc directory
+while [ "$SEARCH_DIR" != "/" ]; do
+    if [ -d "$SEARCH_DIR/data/godmc" ]; then
+        cd "$SEARCH_DIR"
         break
     fi
-    CURRENT_DIR="$(dirname "$CURRENT_DIR")"
+    SEARCH_DIR="$(dirname "$SEARCH_DIR")"
 done
 
 echo "Repository root: $(pwd)"
+echo "PBS_O_WORKDIR was: ${PBS_O_WORKDIR:-"Not set"}"
 
 eval "$(~/miniforge3/bin/conda shell.bash hook)"
 conda activate finemapping
