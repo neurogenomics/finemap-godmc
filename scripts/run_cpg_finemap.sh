@@ -47,7 +47,7 @@ python run_cpg_finemap_optimized.py \
     --batch-size 25 \
     --resume \
     --cleanup \
-    --log-file logs/hail/finemap_job_${PBS_ARRAY_INDEX}.log \
+    --log-file ../logs/hail/finemap_job_${PBS_ARRAY_INDEX}.log \
     --output-dir ../data/finemapping_tmp/ \
     --susie-out-dir ../data/susie_results/
 
