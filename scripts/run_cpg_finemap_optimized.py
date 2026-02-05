@@ -662,8 +662,13 @@ def main():
         logger.error("No QTL data found for specified CpGs. Exiting.")
         return
     
-    # Setup temp directory
-    job_id = os.environ.get("PBS_ARRAY_INDEX", str(os.getpid()))
+    # Setup temp directory with truly unique name
+    # Use full PBS_JOBID (with timestamp) + array index to avoid collisions
+    pbs_jobid = os.environ.get("PBS_JOBID", "local")
+    array_idx = os.environ.get("PBS_ARRAY_INDEX", "0")
+    unique_suffix = os.urandom(4).hex()  # 8-char random hex
+    job_id = f"{pbs_jobid}_{array_idx}_{unique_suffix}"
+    
     ephemeral_base = os.environ.get("EPHEMERAL", os.path.dirname(os.path.abspath(args.output_dir)))
     tmp_dir = os.path.join(ephemeral_base, f"hail_tmp_{job_id}")
     os.makedirs(tmp_dir, exist_ok=True)
