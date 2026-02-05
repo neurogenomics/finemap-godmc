@@ -4,9 +4,15 @@
 #PBS -N run_finemap
 #PBS -J 1-20
 
-# Change to the directory where this script is located, then go to parent (repo root)
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-cd "${SCRIPT_DIR}/.."
+# Find repository root by looking for data/godmc directory (works from any subdirectory)
+CURRENT_DIR="$PWD"
+while [ "$CURRENT_DIR" != "/" ]; do
+    if [ -d "$CURRENT_DIR/data/godmc" ]; then
+        cd "$CURRENT_DIR"
+        break
+    fi
+    CURRENT_DIR="$(dirname "$CURRENT_DIR")"
+done
 
 echo "Repository root: $(pwd)"
 
