@@ -255,7 +255,7 @@ def main():
     ld_matrix_path = "s3a://pan-ukb-us-east-1/ld_release/UKBB.EUR.ldadj.bm"
     ld_variant_index_path = "s3a://pan-ukb-us-east-1/ld_release/UKBB.EUR.ldadj.variant.ht"
 
-    # Load QTL data (only once, outside Hail)
+    # Load QTL data
     print(f"Loading QTL data from {qtl_path}...")
     data = pd.read_csv(qtl_path)
 
@@ -266,6 +266,8 @@ def main():
             master="local[*]",
             tmp_dir=tmp_dir,
             spark_conf=spark_conf,
+            idempotent=True,
+            log="/dev/null",  # Disable Hail logging to avoid cluttering logs with S3 connection messages
         )
         print("Loading LD reference data from S3...")
         bm = BlockMatrix.read(ld_matrix_path)
@@ -286,11 +288,17 @@ def main():
     # Initial Hail setup
     bm, ht_idx = init_hail()
 
-    # Process each CpG, restarting Hail every 40 iterations to prevent S3 connection pool exhaustion
-    RESTART_INTERVAL = 40
+    # Process each CpG, restarting Hail every 60 iterations to prevent S3 connection pool exhaustion
+    RESTART_INTERVAL = 60
     print(f"\nProcessing {len(cpg_ids)} CpGs (restarting Hail every {RESTART_INTERVAL})...\n")
     
     for i, cpg_id in enumerate(cpg_ids, 1):
+        # Skip if already completed
+        susie_output_file = os.path.join(args.susie_out_dir, f"{cpg_id}_susie.csv")
+        if os.path.exists(susie_output_file):
+            print(f"[{i}/{len(cpg_ids)}] Skipping {cpg_id} - already completed")
+            continue
+        
         # Restart Hail periodically to release S3 connections
         if i > 1 and (i - 1) % RESTART_INTERVAL == 0:
             stop_hail()

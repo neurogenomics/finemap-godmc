@@ -17,6 +17,7 @@ export AWS_DEFAULT_REGION="us-east-1"
 # Use ephemeral storage for Spark temp files (more space than /tmp)
 export EPHEMERAL="${EPHEMERAL:-${TMPDIR:-/tmp}}"
 
+
 IDS="../data/godmc/cpg_ids.txt"
 
 TOTAL=$(wc -l < $IDS)
@@ -40,10 +41,13 @@ echo "Using temp directory: ${TEMP_DIR}"
 # Extract this task's CpGs
 sed -n "${START},${END}p" $IDS > "${TEMP_DIR}/cpgs.txt"
 
-python run_cpg_finemap.py \
+# Run optimized script with all paths relative to repo root
+python run_cpg_finemap_optimized.py \
     --cpg-list "${TEMP_DIR}/cpgs.txt" \
-    --run-susie \
+    --batch-size 25 \
+    --resume \
     --cleanup \
+    --log-file ../logs/hail/finemap_job_${PBS_ARRAY_INDEX}.log \
     --output-dir ../data/finemapping_tmp/ \
     --susie-out-dir ../data/susie_results/
 
