@@ -223,29 +223,65 @@ def main():
     # Spark/S3 configuration
     spark_conf = {
         "spark.jars": "/rds/general/user/tc1125/home/jars/hadoop-aws-3.3.4.jar,/rds/general/user/tc1125/home/jars/aws-java-sdk-bundle-1.12.539.jar",
-        # S3 connection settings
-        "spark.hadoop.fs.s3a.connection.maximum": "100",
+        
+        # Memory settings - aggressive use of 250GB node
+        "spark.driver.memory": "220g",  # Use most available memory
+        "spark.driver.maxResultSize": "100g",
+        "spark.memory.fraction": "0.8",
+        "spark.memory.storageFraction": "0.3",
+        
+        # Executor settings for local mode with 65 cores
+        "spark.executor.memory": "220g",
+        "spark.executor.cores": "64",  # Use almost all cores
+        "spark.default.parallelism": "128",  # 2x cores for better utilization
+        "spark.sql.shuffle.partitions": "128",
+        
+        # S3A connection pool - NO SHARING, can be aggressive
+        "spark.hadoop.fs.s3a.connection.maximum": "200",  # Much higher per job
+        "spark.hadoop.fs.s3a.http.connection.maximum": "200",
         "spark.hadoop.fs.s3a.connection.timeout": "600000",
         "spark.hadoop.fs.s3a.connection.establish.timeout": "600000",
+        "spark.hadoop.fs.s3a.connection.idle.timeout": "60000",
+        "spark.hadoop.fs.s3a.threads.max": "32",  # Higher for better S3 throughput
+        
+        # S3A retry settings
         "spark.hadoop.fs.s3a.attempts.maximum": "20",
         "spark.hadoop.fs.s3a.retry.limit": "20",
         "spark.hadoop.fs.s3a.retry.interval": "500ms",
-        # S3 read settings for resilience
-        "spark.hadoop.fs.s3a.readahead.range": "256K",
+        
+        # S3A read optimization for genomic data
+        "spark.hadoop.fs.s3a.readahead.range": "1M",  # Larger for better throughput
         "spark.hadoop.fs.s3a.input.fadvise": "random",
-        "spark.hadoop.fs.s3a.experimental.input.fadvise": "random",
-        # Connection pool and socket settings
-        "spark.hadoop.fs.s3a.threads.max": "64",
-        # General Spark settings
+        "spark.hadoop.fs.s3a.block.size": "128M",
+        "spark.hadoop.fs.s3a.multipart.size": "100M",
+        "spark.hadoop.fs.s3a.fast.upload": "true",
+        "spark.hadoop.fs.s3a.fast.upload.buffer": "disk",
+        "spark.hadoop.fs.s3a.fast.upload.active.blocks": "8",
+        
+        # Network settings
         "spark.network.timeout": "600s",
+        "spark.rpc.askTimeout": "600s",
+        "spark.rpc.lookupTimeout": "600s",
+        
+        # Hail-specific serialization
+        "spark.serializer": "org.apache.spark.serializer.KryoSerializer",
+        "spark.kryo.registrator": "is.hail.kryo.HailKryoRegistrator",
+        "spark.kryoserializer.buffer.max": "1g",
+        
+        # Local settings - use ephemeral storage
         "spark.driver.bindAddress": "127.0.0.1",
         "spark.driver.host": "localhost",
         "spark.local.dir": tmp_dir,
-        # Disable Spark UI to avoid port conflicts when multiple jobs run on the same node
         "spark.ui.enabled": "false",
-        # Use random ports for driver to avoid conflicts
         "spark.driver.port": "0",
         "spark.blockManager.port": "0",
+        
+        # Port conflicts shouldn't be an issue, but keep for safety
+        "spark.port.maxRetries": "100",
+        
+        # Garbage collection tuning for large memory
+        "spark.driver.extraJavaOptions": "-XX:+UseG1GC -XX:InitiatingHeapOccupancyPercent=35 -XX:ConcGCThreads=16 -XX:ParallelGCThreads=32",
+        "spark.executor.extraJavaOptions": "-XX:+UseG1GC -XX:InitiatingHeapOccupancyPercent=35 -XX:ConcGCThreads=16 -XX:ParallelGCThreads=32",
     }
 
     # S3 paths for LD reference data
@@ -263,6 +299,7 @@ def main():
             master="local[*]",
             tmp_dir=tmp_dir,
             spark_conf=spark_conf,
+            min_block_size=256,  # Match S3 block size for better performance
             idempotent=True,
             log="/dev/null",  # Disable Hail logging to avoid cluttering logs with S3 connection messages
         )
