@@ -66,9 +66,6 @@ def process_cpg(
         & (subset["chr"] == lead_snp["chr"])
     ].copy()
 
-    # Convert chromosome to string and map numeric sex chromosomes to letters
-    snp_df["chr"] = snp_df["chr"].astype(str).replace({"23": "X", "24": "Y", "25": "MT"})
-
     # Convert SNPs to hail format
     ht_snp = hl.Table.from_pandas(snp_df)
     ht_snp = ht_snp.annotate(

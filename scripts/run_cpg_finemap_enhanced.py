@@ -228,7 +228,7 @@ def process_cpg(
     idx = final_snp_df["idx"].tolist()
     
     # CRITICAL: Persist filtered matrix to avoid recomputation
-    bm_filtered = bm.filter(idx, idx).persist(storage_level="MEMORY_ONLY")
+    bm_filtered = bm.filter(idx, idx).cache()
     
     # Convert to numpy and symmetrize
     ld_np = bm_filtered.to_numpy()
