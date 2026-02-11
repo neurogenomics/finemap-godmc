@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-data = pd.read_csv("../data/assoc_meta_all.csv.gz")
+data = pd.read_csv("../data/godmc/assoc_meta_all.csv.gz")
 
 print(f"There are {len(data)} total SNP:CpG pairs")
 
@@ -34,6 +34,8 @@ print(f"There are {len(data)} SNP:CpG pairs after filtering out indels")
 
 print("Calculating Z-scores and formatting...")
 data["chr"] = data["snp"].str.split(":").str[0].str.replace("chr", "")
+# Remap numeric sex chromosomes to GRCh37 format (X, Y, MT)
+data["chr"] = data["chr"].replace({"23": "X", "24": "Y", "25": "MT"})
 data["Z"] = data["beta_a1"] / data["se"]
 
 # Remove unused columns here for quicker loading
