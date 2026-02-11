@@ -226,17 +226,12 @@ def process_cpg(
     
     # Get indices and filter BlockMatrix
     idx = final_snp_df["idx"].tolist()
-    
-    # CRITICAL: Persist filtered matrix to avoid recomputation
-    bm_filtered = bm.filter(idx, idx).cache()
+    bm_filtered = bm.filter(idx, idx)
     
     # Convert to numpy and symmetrize
     ld_np = bm_filtered.to_numpy()
     ld_np = (ld_np + ld_np.T) / 2
     np.savetxt(f"{out_dir}/{cpg_id}_LD.txt", ld_np, delimiter=",")
-    
-    # CRITICAL: Unpersist to free memory immediately
-    bm_filtered.unpersist()
     
     # Clean up intermediate tables
     ht_snp.unpersist()
@@ -307,9 +302,8 @@ def init_hail(tmp_dir: str, log_path: str) -> Tuple[BlockMatrix, hl.Table]:
     bm = BlockMatrix.read(f"{LD_S3_BUCKET}/UKBB.EUR.ldadj.bm")
     ht_idx = hl.read_table(f"{LD_S3_BUCKET}/UKBB.EUR.ldadj.variant.ht")
     
-    # CRITICAL: Persist to avoid re-reading during processing
-    print("  Persisting LD data...")
-    bm = bm.persist(storage_level="MEMORY_AND_DISK")
+    # Persist variant index table (BlockMatrix caching not supported)
+    print("  Persisting variant index...")
     ht_idx = ht_idx.persist(storage_level="MEMORY_AND_DISK")
     
     print(f"  ✓ LD data loaded: {bm.shape[0]} variants")
