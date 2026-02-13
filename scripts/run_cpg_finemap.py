@@ -122,10 +122,6 @@ def process_cpg(
     ld_np = (ld_np + ld_np.T) / 2
     np.savetxt(f"{out_dir}/{cpg_id}_LD.txt", ld_np, delimiter=",")
 
-    # Clean up intermediate tables
-    ht_snp.unpersist()
-    ht_matched.unpersist()
-
     print(f"  Data prep completed in {time.time() - start:.2f}s")
     return True
 
@@ -241,71 +237,40 @@ def main():
     tmp_dir = os.path.join(ephemeral_base, f"hail_tmp_{job_id}")
     os.makedirs(tmp_dir, exist_ok=True)
 
-    # Spark/S3 configuration
+    # Spark/S3 configuration - simplified to avoid BlockManager issues
     spark_conf = {
         "spark.jars": "/rds/general/user/tc1125/home/jars/hadoop-aws-3.3.4.jar,/rds/general/user/tc1125/home/jars/aws-java-sdk-bundle-1.12.539.jar",
         
-        # Memory settings - aggressive use of 250GB node
-        "spark.driver.memory": "220g",  # Use most available memory
-        "spark.driver.maxResultSize": "100g",
-        "spark.memory.fraction": "0.8",
-        "spark.memory.storageFraction": "0.3",
+        # Memory settings - conservative
+        "spark.driver.memory": "16g",
+        "spark.driver.maxResultSize": "8g",
         
-        # Executor settings for local mode with 65 cores
-        "spark.executor.memory": "220g",
-        # Executor settings - reduce cores to prevent connection starvation
-        "spark.executor.cores": "32",
-        "spark.default.parallelism": "32",
-        "spark.sql.shuffle.partitions": "32",
+        # Executor settings - minimal for local mode
+        "spark.executor.memory": "16g",
+        "spark.executor.cores": "4",
+        "spark.default.parallelism": "4",
+        "spark.sql.shuffle.partitions": "4",
 
-        # S3A connection pool - generous for the reduced parallelism
-        "spark.hadoop.fs.s3a.connection.maximum": "200",
-        "spark.hadoop.fs.s3a.http.connection.maximum": "200",
-        "spark.hadoop.fs.s3a.connection.request.timeout": "30000",
+        # S3A connection pool - minimal
+        "spark.hadoop.fs.s3a.connection.maximum": "50",
+        "spark.hadoop.fs.s3a.connection.establish.timeout": "60000",
+        "spark.hadoop.fs.s3a.connection.timeout": "60000",
+        "spark.hadoop.fs.s3a.threads.max": "16",
         
-        # S3A connection pool 
-        "spark.hadoop.fs.s3a.connection.establish.timeout": "600000",
-        "spark.hadoop.fs.s3a.connection.idle.timeout": "60000",
-        "spark.hadoop.fs.s3a.threads.max": "32",  # Higher for better S3 throughput
+        # Network settings - reduced timeouts
+        "spark.network.timeout": "120s",
+        "spark.rpc.askTimeout": "120s",
+        "spark.rpc.lookupTimeout": "120s",
+        "spark.rpc.netty.dispatcher.numThreads": "2",
         
-        # S3A retry settings
-        "spark.hadoop.fs.s3a.attempts.maximum": "20",
-        "spark.hadoop.fs.s3a.retry.limit": "20",
-        "spark.hadoop.fs.s3a.retry.interval": "500ms",
-        
-        # S3A read optimization for genomic data
-        "spark.hadoop.fs.s3a.readahead.range": "1M",  # Larger for better throughput
-        "spark.hadoop.fs.s3a.input.fadvise": "random",
-        "spark.hadoop.fs.s3a.block.size": "128M",
-        "spark.hadoop.fs.s3a.multipart.size": "100M",
-        "spark.hadoop.fs.s3a.fast.upload": "true",
-        "spark.hadoop.fs.s3a.fast.upload.buffer": "disk",
-        "spark.hadoop.fs.s3a.fast.upload.active.blocks": "8",
-        
-        # Network settings
-        "spark.network.timeout": "600s",
-        "spark.rpc.askTimeout": "600s",
-        "spark.rpc.lookupTimeout": "600s",
-        
-        # Hail-specific serialization
-        "spark.serializer": "org.apache.spark.serializer.KryoSerializer",
-        "spark.kryo.registrator": "is.hail.kryo.HailKryoRegistrator",
-        "spark.kryoserializer.buffer.max": "1g",
-        
-        # Local settings - use ephemeral storage
+        # Local settings
         "spark.driver.bindAddress": "127.0.0.1",
         "spark.driver.host": "localhost",
         "spark.local.dir": tmp_dir,
         "spark.ui.enabled": "false",
         "spark.driver.port": "0",
         "spark.blockManager.port": "0",
-        
-        # Port conflicts shouldn't be an issue, but keep for safety
-        "spark.port.maxRetries": "100",
-        
-        # Garbage collection tuning for large memory
-        "spark.driver.extraJavaOptions": "-XX:+UseG1GC -XX:InitiatingHeapOccupancyPercent=35 -XX:ConcGCThreads=16 -XX:ParallelGCThreads=32",
-        "spark.executor.extraJavaOptions": "-XX:+UseG1GC -XX:InitiatingHeapOccupancyPercent=35 -XX:ConcGCThreads=16 -XX:ParallelGCThreads=32",
+        "spark.port.maxRetries": "50",
     }
 
     # S3 paths for LD reference data
