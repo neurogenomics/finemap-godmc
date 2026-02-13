@@ -42,28 +42,42 @@ def match_variants(ht_snp: hl.Table, ht_idx: hl.Table) -> hl.Table:
 
 
 def process_cpg(
-    cpg_id: str, data: pd.DataFrame, bm: BlockMatrix, ht_idx: hl.Table, out_dir: str
+    cpg_id: str, cpg_data_dir: str, bm: BlockMatrix, ht_idx: hl.Table, out_dir: str
 ):
     """Prepare Z scores and LD matrix for a single CpG site."""
     start = time.time()
     print(f"Processing CpG {cpg_id}...")
 
-    subset = data[data["cpg"] == cpg_id]
+    # Read only this CpG's data (avoids broadcasting large DataFrame)
+    cpg_file = os.path.join(cpg_data_dir, f"{cpg_id}.csv")
+    if not os.path.exists(cpg_file):
+        # Try compressed versions
+        for ext in [".csv.gz", ".csv.bz2", ".csv.zip", ".csv.xz"]:
+            alt_file = os.path.join(cpg_data_dir, f"{cpg_id}{ext}")
+            if os.path.exists(alt_file):
+                cpg_file = alt_file
+                break
 
-    if len(subset) == 0:
+    if not os.path.exists(cpg_file):
+        print(f"WARNING: No data file found for CpG {cpg_id}, skipping.")
+        return False
+
+    snp_df = pd.read_csv(cpg_file)
+
+    if len(snp_df) == 0:
         print(f"WARNING: No data found for CpG {cpg_id}, skipping.")
         return False
 
     # Get the lead SNP (smallest p-value)
-    lead_snp = subset.loc[subset["pval"].idxmin()]
+    lead_snp = snp_df.loc[snp_df["pval"].idxmin()]
     snp_loc = lead_snp["pos"]
 
     # Extract all other SNPs within a 3Mb window on the same chromosome
     window_start = snp_loc - 1_500_000
     window_end = snp_loc + 1_500_000
-    snp_df = subset[
-        (subset["pos"].between(window_start, window_end))
-        & (subset["chr"] == lead_snp["chr"])
+    snp_df = snp_df[
+        (snp_df["pos"].between(window_start, window_end))
+        & (snp_df["chr"] == lead_snp["chr"])
     ].copy()
 
     # Convert SNPs to hail format
@@ -169,7 +183,9 @@ def main():
         help="Comma-separated list of CpG IDs or path to file with one CpG per line",
     )
     parser.add_argument(
-        "--qtl-path", default="../data/godmc/assoc_meta_for_finemapping.csv"
+        "--cpg-data-dir",
+        required=True,
+        help="Directory containing per-CpG CSV files (from split_qtl_by_cpg.py)",
     )
     parser.add_argument("--output-dir", default="../data/finemapping_tmp/")
     parser.add_argument(
@@ -188,14 +204,13 @@ def main():
     )
 
     args = parser.parse_args()
-    qtl_path = args.qtl_path
+    cpg_data_dir = args.cpg_data_dir
     out_dir = args.output_dir
 
     # Ensure output directories exist
     os.makedirs(out_dir, exist_ok=True)
     if args.run_susie:
         os.makedirs(args.susie_out_dir, exist_ok=True)
-    out_dir = args.output_dir
 
     # Parse CpG list
     if os.path.exists(args.cpg_list):
@@ -207,6 +222,12 @@ def main():
         # Process comma-separated list
         cpg_ids = [cpg.strip() for cpg in args.cpg_list.split(",")]
         print(f"Processing {len(cpg_ids)} CpG IDs")
+
+    # Validate CpG data directory
+    if not os.path.exists(cpg_data_dir):
+        print(f"ERROR: CpG data directory not found: {cpg_data_dir}")
+        print("Run split_qtl_by_cpg.py first to create per-CpG files")
+        return
 
     # Set up unique temp/log directories per job to avoid conflicts
     job_id = os.environ.get("PBS_ARRAY_INDEX", str(os.getpid()))
@@ -232,14 +253,17 @@ def main():
         
         # Executor settings for local mode with 65 cores
         "spark.executor.memory": "220g",
-        "spark.executor.cores": "64",  # Use almost all cores
-        "spark.default.parallelism": "128",  # 2x cores for better utilization
-        "spark.sql.shuffle.partitions": "128",
-        
-        # S3A connection pool - NO SHARING, can be aggressive
-        "spark.hadoop.fs.s3a.connection.maximum": "200",  # Much higher per job
+        # Executor settings - reduce cores to prevent connection starvation
+        "spark.executor.cores": "32",
+        "spark.default.parallelism": "32",
+        "spark.sql.shuffle.partitions": "32",
+
+        # S3A connection pool - generous for the reduced parallelism
+        "spark.hadoop.fs.s3a.connection.maximum": "200",
         "spark.hadoop.fs.s3a.http.connection.maximum": "200",
-        "spark.hadoop.fs.s3a.connection.timeout": "600000",
+        "spark.hadoop.fs.s3a.connection.request.timeout": "30000",
+        
+        # S3A connection pool 
         "spark.hadoop.fs.s3a.connection.establish.timeout": "600000",
         "spark.hadoop.fs.s3a.connection.idle.timeout": "60000",
         "spark.hadoop.fs.s3a.threads.max": "32",  # Higher for better S3 throughput
@@ -288,9 +312,7 @@ def main():
     ld_matrix_path = "s3a://pan-ukb-us-east-1/ld_release/UKBB.EUR.ldadj.bm"
     ld_variant_index_path = "s3a://pan-ukb-us-east-1/ld_release/UKBB.EUR.ldadj.variant.ht"
 
-    # Load QTL data
-    print(f"Loading QTL data from {qtl_path}...")
-    data = pd.read_csv(qtl_path)
+    print(f"Using pre-split CpG data from: {cpg_data_dir}")
 
     def init_hail():
         """Initialize Hail and load LD reference data."""
@@ -340,7 +362,7 @@ def main():
         
         print(f"[{i}/{len(cpg_ids)}] ", end="")
         try:
-            success = process_cpg(cpg_id, data, bm, ht_idx, out_dir)
+            success = process_cpg(cpg_id, cpg_data_dir, bm, ht_idx, out_dir)
 
             if success and args.run_susie:
                 run_susie(cpg_id, out_dir, args.susie_out_dir, args.cleanup)
