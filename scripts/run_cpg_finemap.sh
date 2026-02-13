@@ -44,6 +44,7 @@ python run_cpg_finemap.py \
     --cpg-list "${TEMP_DIR}/cpgs.txt" \
     --run-susie \
     --cleanup \
+    --cpg-data-dir ../data/godmc/per_cpg/
     --output-dir ../data/finemapping_tmp/ \
     --susie-out-dir ../data/susie_results/
 
