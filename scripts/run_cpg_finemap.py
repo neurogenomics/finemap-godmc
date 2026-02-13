@@ -75,6 +75,7 @@ def process_cpg(
     # Extract all other SNPs within a 3Mb window on the same chromosome
     window_start = snp_loc - 1_500_000
     window_end = snp_loc + 1_500_000
+    snp_df['chr'] = snp_df['chr'].astype(str)  # Ensure chromosome is string for matching
     snp_df = snp_df[
         (snp_df["pos"].between(window_start, window_end))
         & (snp_df["chr"] == lead_snp["chr"])
@@ -288,7 +289,6 @@ def main():
             spark_conf=spark_conf,
             min_block_size=256,  # Match S3 block size for better performance
             idempotent=True,
-            log="/dev/null",  # Disable Hail logging to avoid cluttering logs with S3 connection messages
         )
         print("Loading LD reference data from S3...")
         bm = BlockMatrix.read(ld_matrix_path)
