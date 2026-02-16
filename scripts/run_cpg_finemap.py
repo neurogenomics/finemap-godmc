@@ -68,18 +68,27 @@ def process_cpg(
         print(f"WARNING: No data found for CpG {cpg_id}, skipping.")
         return False
 
+    # Normalize chromosome type before selecting/filtering to avoid int-vs-str mismatches
+    snp_df["chr"] = snp_df["chr"].astype(str)
+
     # Get the lead SNP (smallest p-value)
     lead_snp = snp_df.loc[snp_df["pval"].idxmin()]
     snp_loc = lead_snp["pos"]
+    lead_chr = str(lead_snp["chr"])
 
     # Extract all other SNPs within a 3Mb window on the same chromosome
     window_start = snp_loc - 1_500_000
     window_end = snp_loc + 1_500_000
-    snp_df['chr'] = snp_df['chr'].astype(str)  # Ensure chromosome is string for matching
     snp_df = snp_df[
         (snp_df["pos"].between(window_start, window_end))
-        & (snp_df["chr"] == lead_snp["chr"])
+        & (snp_df["chr"] == lead_chr)
     ].copy()
+
+    if len(snp_df) == 0:
+        print(
+            f"WARNING: No SNPs in 3Mb window for CpG {cpg_id} after chromosome filtering, skipping."
+        )
+        return False
 
     # Convert SNPs to hail format
     ht_snp = hl.Table.from_pandas(snp_df)
